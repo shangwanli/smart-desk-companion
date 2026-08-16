@@ -1,39 +1,45 @@
+/**
+ * 非阻塞电机控制器 — L298N 迷你版 实现
+ *
+ * 差分驱动运动学 (右电机物理反向安装):
+ *   FORWARD:  IN1=1 IN2=0  IN3=0 IN4=1  (左CW + 右CCW = 前进)
+ *   BACKWARD: IN1=0 IN2=1  IN3=1 IN4=0  (左CCW + 右CW = 后退)
+ *   LEFT:     IN1=0 IN2=1  IN3=0 IN4=1  (左CCW + 右CCW = 左转)
+ *   RIGHT:    IN1=1 IN2=0  IN3=1 IN4=0  (左CW + 右CW = 右转)
+ */
+
 #include "motor_controller.h"
 #include "config.h"
 
-// ============================
-// Motor pin sequence lookup
-// ============================
-// Each row: LF, LB, RF, RB
+// 方向序列: [IN1, IN2, IN3, IN4]
+// 方向序列与原始 jiqiren.ino 完全一致
+// 差分驱动：右电机物理反向安装，所以前进时右轮需 CCW
 static const uint8_t MOTOR_SEQ[][4] = {
   {0,0,0,0}, // M_STOP
-  {1,0,1,0}, // M_FORWARD  (LF+RF = 两轮前进)
-  {0,1,0,1}, // M_BACKWARD (LB+RB = 两轮后退)
-  {0,1,1,0}, // M_LEFT     (LB+RF = 左退右进)
-  {1,0,0,1}, // M_RIGHT    (LF+RB = 左进右退)
-  {0,1,0,0}, // M_LEFT_BWD  (左轮后退)
-  {0,0,0,1}, // M_RIGHT_BWD (右轮后退)
-  {1,0,0,0}, // M_LEFT_FWD  (左轮前进)
-  {0,0,1,0}, // M_RIGHT_FWD (右轮前进)
+  {1,0,0,1}, // M_FORWARD   (左 CW + 右 CCW = 前进)
+  {0,1,1,0}, // M_BACKWARD  (左 CCW + 右 CW = 后退)
+  {0,1,0,1}, // M_LEFT      (左 CCW + 右 CCW = 左转)
+  {1,0,1,0}, // M_RIGHT     (左 CW + 右 CW = 右转)
+  {0,1,0,0}, // M_LEFT_BWD
+  {0,0,0,1}, // M_RIGHT_BWD
+  {1,0,0,0}, // M_LEFT_FWD
+  {0,0,1,0}, // M_RIGHT_FWD
 };
 
 void MotorController::begin() {
-  pinMode(PIN_STBY, OUTPUT);
-  digitalWrite(PIN_STBY, LOW);
+  // 方向引脚
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_IN3, OUTPUT);
+  pinMode(PIN_IN4, OUTPUT);
 
-  // 配置 4 路 PWM
-  ledcSetup(PWM_CH_LF, PWM_FREQ, PWM_RES);
-  ledcSetup(PWM_CH_LB, PWM_FREQ, PWM_RES);
-  ledcSetup(PWM_CH_RF, PWM_FREQ, PWM_RES);
-  ledcSetup(PWM_CH_RB, PWM_FREQ, PWM_RES);
-
-  ledcAttachPin(PIN_LF, PWM_CH_LF);
-  ledcAttachPin(PIN_LB, PWM_CH_LB);
-  ledcAttachPin(PIN_RF, PWM_CH_RF);
-  ledcAttachPin(PIN_RB, PWM_CH_RB);
+  // PWM 通道
+  ledcSetup(PWM_CH_ENA, PWM_FREQ, PWM_RES);
+  ledcSetup(PWM_CH_ENB, PWM_FREQ, PWM_RES);
+  ledcAttachPin(PIN_ENA, PWM_CH_ENA);
+  ledcAttachPin(PIN_ENB, PWM_CH_ENB);
 
   stop();
-  digitalWrite(PIN_STBY, HIGH);
 }
 
 void MotorController::stop() {
@@ -43,13 +49,12 @@ void MotorController::stop() {
 }
 
 void MotorController::execute(MotorCmd cmd, uint8_t speed, uint32_t duration_ms) {
-  // 限制时长
   if (duration_ms > MOTOR_MAX_DURATION_MS) {
     duration_ms = MOTOR_MAX_DURATION_MS;
   }
 
   const uint8_t *seq = MOTOR_SEQ[cmd];
-  _softStartInit(seq[0], seq[1], seq[2], seq[3], speed);
+  _softStartInit(seq[0], seq[1], seq[2], seq[3], speed, speed);
 
   _running = true;
   _startTime = millis();
@@ -59,62 +64,72 @@ void MotorController::execute(MotorCmd cmd, uint8_t speed, uint32_t duration_ms)
 }
 
 void MotorController::update() {
-  // 软启动渐变（非阻塞）
   if (_ramping) {
     _softStartTick();
   }
 
   if (!_running) return;
 
-  uint32_t elapsed = millis() - _startTime;
-  if (elapsed >= _duration) {
+  if (millis() - _startTime >= _duration) {
     _brake();
     _running = false;
   }
 }
 
-void MotorController::setMotor(uint8_t lf, uint8_t lb, uint8_t rf, uint8_t rb, uint8_t speed) {
-  _drivePins(lf, lb, rf, rb, speed);
-  _running = false; // raw control has no timeout
+void MotorController::setMotor(uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in4, uint8_t speed) {
+  // 直接控制，不走超时（探索模式用）
+  _setDirection(in1, in2, in3, in4);
+  _setPWM(speed, speed);
+  _running = false;
 }
 
 // ---- Private ----
 
-void MotorController::_drivePins(uint8_t lf, uint8_t lb, uint8_t rf, uint8_t rb, uint8_t speed) {
-  ledcWrite(PWM_CH_LF, lf ? speed : 0);
-  ledcWrite(PWM_CH_LB, lb ? speed : 0);
-  ledcWrite(PWM_CH_RF, rf ? speed : 0);
-  ledcWrite(PWM_CH_RB, rb ? speed : 0);
+void MotorController::_setDirection(uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in4) {
+  digitalWrite(PIN_IN1, in1);
+  digitalWrite(PIN_IN2, in2);
+  digitalWrite(PIN_IN3, in3);
+  digitalWrite(PIN_IN4, in4);
 }
 
-void MotorController::_softStartInit(uint8_t lf, uint8_t lb, uint8_t rf, uint8_t rb, uint8_t target) {
-  _rampLf = lf; _rampLb = lb; _rampRf = rf; _rampRb = rb;
-  _rampCur = 30;  // 起始速度
-  _rampTarget = target;
+void MotorController::_setPWM(uint8_t leftSpeed, uint8_t rightSpeed) {
+  ledcWrite(PWM_CH_ENA, leftSpeed);
+  ledcWrite(PWM_CH_ENB, rightSpeed);
+}
+
+void MotorController::_softStartInit(uint8_t in1, uint8_t in2, uint8_t in3, uint8_t in4,
+                                     uint8_t leftSpeed, uint8_t rightSpeed) {
+  _rIn1 = in1; _rIn2 = in2; _rIn3 = in3; _rIn4 = in4;
+  _rCur = 30;
+  _rTargetL = leftSpeed;
+  _rTargetR = rightSpeed;
   _ramping = true;
   _rampLastTick = millis();
-  _drivePins(lf, lb, rf, rb, _rampCur);
+  _setDirection(in1, in2, in3, in4);
+  _setPWM(30, 30);
 }
 
 void MotorController::_softStartTick() {
-  unsigned long now = millis();
-  if (now - _rampLastTick < (MOTOR_RAMP_MS / 10)) return;
-  _rampLastTick = now;
+  if (millis() - _rampLastTick < (MOTOR_RAMP_MS / 10)) return;
+  _rampLastTick = millis();
 
-  if (_rampCur >= _rampTarget) {
+  uint8_t tgt = max(_rTargetL, _rTargetR);
+  if (_rCur >= tgt) {
     _ramping = false;
     return;
   }
 
-  _rampCur += 25;
-  if (_rampCur > _rampTarget) _rampCur = _rampTarget;
-  _drivePins(_rampLf, _rampLb, _rampRf, _rampRb, _rampCur);
+  _rCur += 25;
+  if (_rCur > tgt) _rCur = tgt;
+  _setPWM(min(_rCur, _rTargetL), min(_rCur, _rTargetR));
 }
 
 void MotorController::_brake() {
   _ramping = false;
-  ledcWrite(PWM_CH_LF, 0);
-  ledcWrite(PWM_CH_LB, 0);
-  ledcWrite(PWM_CH_RF, 0);
-  ledcWrite(PWM_CH_RB, 0);
+  ledcWrite(PWM_CH_ENA, 0);
+  ledcWrite(PWM_CH_ENB, 0);
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+  digitalWrite(PIN_IN3, LOW);
+  digitalWrite(PIN_IN4, LOW);
 }

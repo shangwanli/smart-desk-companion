@@ -8,7 +8,7 @@
 #include "FluxGarage_RoboEyes.h"
 #include "motor_controller.h"
 #ifdef AUDIO_ENABLED
-  #include "audio_streamer.h"
+#include "audio_streamer.h"
 #endif
 
 // ============================
@@ -30,7 +30,7 @@ enum RobotMode {
   MODE_STANDALONE,  // 随机探索
   MODE_SLEEP        // 休眠（闭眼，电机停）
 };
-RobotMode mode = MODE_ACTIVE;
+RobotMode mode = MODE_SLEEP;  // 初始值避免与 enterMode(MODE_ACTIVE) 冲突
 
 unsigned long lastInteraction = 0;  // 上次收到 PC 指令的时间
 bool wsClientConnected = false;     // 是否有 WebSocket 客户端
@@ -170,7 +170,11 @@ void handleJsonCommand(const char *json) {
       roboEyes.setMood(HAPPY);
       motor.execute(M_FORWARD, 150, 350);
       // 前进结束后延迟 50ms 再后退（非阻塞）
-      delayedAction = {true, M_BACKWARD, 150, 300, millis() + 400};
+      delayedAction.pending = true;
+      delayedAction.cmd = M_BACKWARD;
+      delayedAction.speed = 150;
+      delayedAction.duration = 300;
+      delayedAction.triggerAt = millis() + 400;
     } else if (strcmp(mood, "angry") == 0) {
       roboEyes.setMood(ANGRY);
       motor.execute(M_FORWARD, 255, 300);
@@ -182,7 +186,7 @@ void handleJsonCommand(const char *json) {
     } else if (strcmp(mood, "laugh") == 0) {
       roboEyes.anim_laugh();
     } else {
-      roboEyes.setMood(DEFAULT);
+      roboEyes.setMood(0);
     }
     Serial.printf("[CMD] expression: %s\n", mood);
   }
@@ -268,14 +272,14 @@ void enterMode(RobotMode newMode) {
   switch (newMode) {
     case MODE_ACTIVE:
       roboEyes.open();
-      roboEyes.setMood(DEFAULT);
+      roboEyes.setMood(0);
       roboEyes.setIdleMode(ON, 2, 2);
       roboEyes.setAutoblinker(ON, 3, 2);
       break;
 
     case MODE_STANDALONE:
       roboEyes.open();
-      roboEyes.setMood(DEFAULT);
+      roboEyes.setMood(0);
       roboEyes.setIdleMode(ON, 2, 2);
       roboEyes.setAutoblinker(ON, 3, 2);
       motor.stop();
@@ -327,14 +331,14 @@ void doExploreTick() {
     uint8_t spd = random(80, 160);
 
     switch (cmd) {
-      case M_FORWARD:   motor.setMotor(1,0,1,0, spd); break;  // LF+RF
-      case M_BACKWARD:  motor.setMotor(0,1,0,1, spd); break;  // LB+RB
-      case M_LEFT:      motor.setMotor(0,1,1,0, spd); break;  // LB+RF
-      case M_RIGHT:     motor.setMotor(1,0,0,1, spd); break;  // LF+RB
-      case M_LEFT_FWD:  motor.setMotor(1,0,0,0, spd); break;  // LF
-      case M_RIGHT_FWD: motor.setMotor(0,0,1,0, spd); break;  // RF
-      case M_LEFT_BWD:  motor.setMotor(0,1,0,0, spd); break;  // LB
-      case M_RIGHT_BWD: motor.setMotor(0,0,0,1, spd); break;  // RB
+      case M_FORWARD:   motor.setMotor(1,0,0,1, spd); break;  // 前进
+      case M_BACKWARD:  motor.setMotor(0,1,1,0, spd); break;  // 后退
+      case M_LEFT:      motor.setMotor(0,1,0,1, spd); break;  // 左转
+      case M_RIGHT:     motor.setMotor(1,0,1,0, spd); break;  // 右转
+      case M_LEFT_FWD:  motor.setMotor(1,0,0,0, spd); break;  // 左轮前进
+      case M_RIGHT_FWD: motor.setMotor(0,0,1,0, spd); break;  // 右轮前进
+      case M_LEFT_BWD:  motor.setMotor(0,1,0,0, spd); break;  // 左轮后退
+      case M_RIGHT_BWD: motor.setMotor(0,0,0,1, spd); break;  // 右轮后退
       default:          motor.setMotor(0,0,0,0, 0);   break;
     }
 
@@ -371,29 +375,31 @@ void setup() {
   Serial.println("  智能桌面伴侣 - 启动中...");
   Serial.println("==================================");
 
-  // ---- 电机 ----
+  // ---- 电机初始化 ----
   motor.begin();
   Serial.println("[OK] Motor controller");
 
-  // ---- OLED + RoboEyes ----
+  // ---- 启动自检：两轮前进 300ms → 后退 300ms → 停 ----
+  Serial.println("[TEST] 电机自检...");
+  motor.setMotor(1, 0, 0, 1, 255);  // 前进
+  delay(300);
+  motor.setMotor(0, 1, 1, 0, 255);  // 后退
+  delay(300);
+  motor.stop();
+  Serial.println("[OK] 电机自检完成");
+
+  // ---- OLED + RoboEyes（WiFi 之前初始化，眼睛先显示）----
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("[FAIL] OLED 初始化失败！");
   } else {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("Smart Desk");
-    display.println("Companion v1.0");
-    display.display();
     Serial.println("[OK] OLED");
   }
 
   roboEyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 100);
   roboEyes.setAutoblinker(ON, 3, 2);
   roboEyes.setIdleMode(ON, 2, 2);
-  roboEyes.setMood(DEFAULT);
+  roboEyes.setMood(0);
   Serial.println("[OK] RoboEyes");
 
   // ---- WiFi ----
@@ -418,7 +424,7 @@ void setup() {
 
   // ---- 启动状态 ----
   lastInteraction = millis();
-  enterMode(MODE_ACTIVE);
+  mode = MODE_ACTIVE;  // 直接赋值，跳过 enterMode() 的重复初始化
 
   Serial.println("==================================");
   Serial.printf("  IP: %s:%d\n", WiFi.localIP().toString().c_str(), WS_PORT);
@@ -454,7 +460,7 @@ void loop() {
         roboEyes.setMood(TIRED);
         Serial.println("[BATT] 低电量！眼睛变困倦提示");
       } else {
-        roboEyes.setMood(DEFAULT);
+        roboEyes.setMood(0);
       }
     }
   }
